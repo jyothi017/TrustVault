@@ -9,7 +9,7 @@ import ThreatCenter from "./ThreatCenter";
 import Login from "./Login";
 
 
-const API_BASE = "http://localhost:5000/api";
+const API_BASE = "https://trustvault-backend-z1yy.onrender.com/api";
 
 
 const navItems = [
@@ -157,7 +157,22 @@ function App() {
 
   const [documents, setDocuments] = useState([]);
   const [auditLogs, setAuditLogs] = useState([]);
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+  const refreshDashboard = () => {
+    if (document.visibilityState === "visible") {
+      setRefreshKey((previous) => previous + 1);
+    }
+  };
 
+  window.addEventListener("focus", refreshDashboard);
+  document.addEventListener("visibilitychange", refreshDashboard);
+
+  return () => {
+    window.removeEventListener("focus", refreshDashboard);
+    document.removeEventListener("visibilitychange", refreshDashboard);
+  };
+}, []);
   const [dashboardStats, setDashboardStats] = useState({
     totalDocuments: 0,
     sharedWithOthers: 0,
@@ -197,13 +212,21 @@ function App() {
           ]);
 
         if (
-          docsResponse.status === 401 ||
-          logsResponse.status === 401 ||
-          statsResponse.status === 401
-        ) {
-          throw new Error("Your session has expired. Please log in again.");
-        }
+  docsResponse.status === 401 ||
+  logsResponse.status === 401 ||
+  statsResponse.status === 401
+) {
+  localStorage.removeItem("trustvault_session");
 
+  if (!cancelled) {
+    setSession(null);
+    setDocuments([]);
+    setAuditLogs([]);
+    setDashboardError("");
+  }
+
+  return;
+}
         if (!docsResponse.ok) {
           throw new Error("Could not load documents.");
         }
@@ -273,7 +296,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [session?.token]);
+  }, [session?.token, refreshKey]);
 
   const visibleDocuments = useMemo(() => {
     const searchText = search.trim().toLowerCase();
@@ -325,7 +348,9 @@ const categoryOptions = useMemo(() => {
     ...new Set([...defaultCategories, ...documentCategories]),
   ].sort((a, b) => a.localeCompare(b));
 }, [documents]);
-
+function handleDocumentsChanged() {
+  setRefreshKey((previous) => previous + 1);
+}
   function handleLogout() {
     localStorage.removeItem("trustvault_session");
     setSession(null);
@@ -419,7 +444,7 @@ const categoryOptions = useMemo(() => {
           {active === "Access Control" ? (
             <AccessControl />
           ) : active === "My Vault" ? (
-            <MyVault />
+            <MyVault onDocumentsChanged={handleDocumentsChanged} />
           ) : active === "Shared with me" ? (
             <SharedWithMe />
           ) : active === "Audit Trail" ? (
@@ -485,7 +510,11 @@ const categoryOptions = useMemo(() => {
                   </div>
 
                   <div className="stat-value">
-                    {dashboardLoading ? "…" : dashboardStats.totalDocuments}
+                  {dashboardLoading
+  ? "…"
+  : dashboardError
+    ? "—"
+    : dashboardStats.totalDocuments}
                     <span className="stat-caption"> files</span>
                   </div>
 
