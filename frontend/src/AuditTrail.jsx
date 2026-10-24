@@ -31,6 +31,19 @@ function getActionLabel(action) {
   return labels[action] || String(action || "Activity").replaceAll("_", " ");
 }
 
+function getAuthHeaders() {
+  const savedSession = localStorage.getItem("trustvault_session");
+  const session = savedSession ? JSON.parse(savedSession) : null;
+
+  if (!session?.token) {
+    throw new Error("Please log in again to view audit logs.");
+  }
+
+  return {
+    Authorization: `Bearer ${session.token}`,
+  };
+}
+
 export default function AuditTrail() {
   const [activities, setActivities] = useState([]);
   const [search, setSearch] = useState("");
@@ -43,22 +56,35 @@ export default function AuditTrail() {
     setError("");
 
     try {
-      const response = await fetch(API_URL);
+      const response = await fetch(API_URL, {
+        method: "GET",
+        headers: {
+          ...getAuthHeaders(),
+          "Cache-Control": "no-cache",
+        },
+        cache: "no-store",
+      });
+
+      const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
+        throw new Error(
+          data.error || `Server returned ${response.status}`
+        );
       }
 
-      const data = await response.json();
+     
+const logList = Array.isArray(data) ? data : data.logs;
 
-      if (!Array.isArray(data)) {
-        throw new Error("Unexpected response from the server");
-      }
+if (!Array.isArray(logList)) {
+  throw new Error("Unexpected response from the server.");
+}
 
-      setActivities(data);
+setActivities(logList);
+
     } catch (err) {
       setError(
-        "Could not load audit logs. Check that the backend is running."
+        err.message || "Could not load audit logs. Check the backend."
       );
       console.error("Audit logs fetch error:", err);
     } finally {
@@ -80,8 +106,7 @@ export default function AuditTrail() {
         .toLowerCase()
         .includes(search.toLowerCase());
 
-      const matchesFilter =
-        filter === "All" || action === filter;
+      const matchesFilter = filter === "All" || action === filter;
 
       return matchesSearch && matchesFilter;
     });
@@ -149,9 +174,7 @@ export default function AuditTrail() {
             <p>Search and filter actual audit records.</p>
           </div>
 
-          <span className="vault-count">
-            {filtered.length} events
-          </span>
+          <span className="vault-count">{filtered.length} events</span>
         </div>
 
         <div className="vault-toolbar">
@@ -206,13 +229,9 @@ export default function AuditTrail() {
                     <td>
                       <strong>{getActionLabel(item.action)}</strong>
                     </td>
-
                     <td>{item.document_name || "—"}</td>
-
                     <td>{item.actor || "anonymous"}</td>
-
                     <td>{item.ip_address || "—"}</td>
-
                     <td>{formatDate(item.created_at)}</td>
                   </tr>
                 ))}
@@ -220,9 +239,7 @@ export default function AuditTrail() {
           </table>
 
           {loading && (
-            <div className="vault-empty">
-              Loading audit records...
-            </div>
+            <div className="vault-empty">Loading audit records...</div>
           )}
 
           {!loading && !error && filtered.length === 0 && (

@@ -4,6 +4,30 @@ import "./App.css";
 
 const API_URL = "http://localhost:5000/api/documents";
 
+function getAuthHeaders() {
+  const savedSession = localStorage.getItem("trustvault_session");
+
+  if (!savedSession) {
+    throw new Error("Please log in again.");
+  }
+
+  let session;
+
+  try {
+    session = JSON.parse(savedSession);
+  } catch {
+    throw new Error("Your saved session is invalid. Please log in again.");
+  }
+
+  if (!session?.token) {
+    throw new Error("Login token missing. Please log in again.");
+  }
+
+  return {
+    Authorization: `Bearer ${session.token}`,
+  };
+}
+
 const categories = ["Business", "HR", "Security", "Finance", "Other"];
 
 function formatSize(bytes) {
@@ -23,7 +47,11 @@ function formatSize(bytes) {
 function formatDate(value) {
   if (!value) return "Today";
 
-  return new Date(value).toLocaleDateString("en-GB", {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "Today";
+
+  return date.toLocaleDateString("en-GB", {
     day: "2-digit",
     month: "short",
     year: "numeric",
@@ -37,12 +65,16 @@ function mapDocument(doc) {
     category: String(doc.category || "Other").trim(),
     size: formatSize(doc.file_size),
     date: formatDate(doc.created_at),
-    type: doc.file_type || doc.name?.split(".").pop().toUpperCase() || "FILE",
+    type: String(
+      doc.file_type ||
+        doc.name?.split(".").pop() ||
+        "FILE"
+    ).replace(".", "").toUpperCase(),
     hasFile: Boolean(doc.stored_filename),
   };
 }
 
-export default function MyVault() {
+export default function MyVault({ onDocumentsChanged }) {
   const [files, setFiles] = useState([]);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All files");
@@ -54,19 +86,31 @@ export default function MyVault() {
   // Load documents from the backend.
   async function loadDocuments() {
     try {
-      const response = await fetch(API_URL);
+      const response = await fetch(API_URL, {
+        headers: getAuthHeaders(),
+      });
+
+      const result = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error("Could not load documents.");
+        throw new Error(
+          result.message ||
+            result.error ||
+            "Could not load documents."
+        );
       }
 
-      const data = await response.json();
+      // Backend returns { documents: [...] }.
+      // Also support a direct array response.
+      const documents = Array.isArray(result)
+        ? result
+        : result.documents;
 
-      if (!Array.isArray(data)) {
+      if (!Array.isArray(documents)) {
         throw new Error("Invalid document data received.");
       }
 
-      setFiles(data.map(mapDocument));
+      setFiles(documents.map(mapDocument));
     } catch (error) {
       console.error("Load documents error:", error);
       setMessage(error.message || "Could not connect to the backend.");
@@ -79,7 +123,7 @@ export default function MyVault() {
     loadDocuments();
   }, []);
 
-  // Search documents and filter them by category.
+  // Search documents and filter by category.
   const filteredFiles = useMemo(() => {
     const searchText = search.trim().toLowerCase();
     const selectedFilter = category.trim().toLowerCase();
@@ -110,7 +154,9 @@ export default function MyVault() {
 
     if (selectedFiles.length === 0 || busy) return;
 
-    const allowedExtensions = /\.(pdf|doc|docx|xls|xlsx|txt)$/i;
+    const allowedExtensions =
+      /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|png|jpg|jpeg)$/i;
+
     const maxSize = 10 * 1024 * 1024;
 
     const validFiles = selectedFiles.filter(
@@ -123,7 +169,7 @@ export default function MyVault() {
 
     if (validFiles.length === 0) {
       setMessage(
-        "Choose PDF, DOC, DOCX, XLS, XLSX or TXT files up to 10 MB."
+        "Choose a supported file up to 10 MB. Supported: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, TXT, PNG, JPG and JPEG."
       );
       return;
     }
@@ -139,18 +185,25 @@ export default function MyVault() {
         try {
           const formData = new FormData();
 
-          formData.append("file", file);
+          // Backend expects the field name "document".
+          formData.append("document", file);
           formData.append("category", selectedCategory);
 
-          const response = await fetch(`${API_URL}/upload`, {
+          // Backend upload route is POST /api/documents.
+          const response = await fetch(API_URL, {
             method: "POST",
+            headers: getAuthHeaders(),
             body: formData,
           });
 
           const result = await response.json().catch(() => ({}));
 
           if (!response.ok) {
-            throw new Error(result.error || "Upload failed.");
+            throw new Error(
+              result.message ||
+                result.error ||
+                `Upload failed (${response.status}).`
+            );
           }
 
           savedCount++;
@@ -161,9 +214,13 @@ export default function MyVault() {
         }
       }
 
-      await loadDocuments();
+     await loadDocuments();
 
-      setCategory("All files");
+if (savedCount > 0 && typeof onDocumentsChanged === "function") {
+  onDocumentsChanged();
+}
+
+setCategory("All files");
 
       setMessage(
         `${savedCount} file(s) uploaded successfully.` +
@@ -181,6 +238,8 @@ export default function MyVault() {
 
   // Download a document.
   async function downloadFile(file) {
+    if (busy) return;
+
     if (!file.hasFile) {
       setMessage(
         "This record has no uploaded file. Please upload the file again."
@@ -192,18 +251,26 @@ export default function MyVault() {
       setMessage(`Downloading ${file.name}...`);
 
       const response = await fetch(
-        `${API_URL}/${file.id}/download`
+        `${API_URL}/${file.id}/download`,
+        {
+          headers: getAuthHeaders(),
+        }
       );
 
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
-        throw new Error(result.error || "Download failed.");
+
+        throw new Error(
+          result.message ||
+            result.error ||
+            `Download failed (${response.status}).`
+        );
       }
 
       const blob = await response.blob();
       const objectUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
 
+      const link = document.createElement("a");
       link.href = objectUrl;
       link.download = file.name;
 
@@ -216,7 +283,10 @@ export default function MyVault() {
       setMessage(`Download started: ${file.name}`);
     } catch (error) {
       console.error("Download failed:", error);
-      setMessage(error.message || "Could not download the file.");
+
+      setMessage(
+        error.message || "Could not download the file."
+      );
     }
   }
 
@@ -235,22 +305,34 @@ export default function MyVault() {
     try {
       const response = await fetch(`${API_URL}/${id}`, {
         method: "DELETE",
+        headers: getAuthHeaders(),
       });
 
       const result = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(result.error || "Could not delete document.");
+        throw new Error(
+          result.message ||
+            result.error ||
+            "Could not delete document."
+        );
       }
 
-      setFiles((previous) =>
-        previous.filter((file) => file.id !== id)
-      );
+     setFiles((previous) =>
+  previous.filter((file) => file.id !== id)
+);
 
-      setMessage("Document deleted.");
+setMessage("Document deleted successfully.");
+
+if (typeof onDocumentsChanged === "function") {
+  onDocumentsChanged();
+}
     } catch (error) {
       console.error("Delete failed:", error);
-      setMessage(error.message || "Could not delete document.");
+
+      setMessage(
+        error.message || "Could not delete document."
+      );
     } finally {
       setBusy(false);
     }
@@ -294,7 +376,7 @@ export default function MyVault() {
             <input
               type="file"
               multiple
-              accept=".pdf,.doc,.docx,.xls,.xlsx,.txt"
+              accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.png,.jpg,.jpeg"
               onChange={handleUpload}
               disabled={busy}
             />
@@ -324,11 +406,15 @@ export default function MyVault() {
         <div>
           <span>Categories</span>
           <strong>
-            {new Set(
-              files.map((file) =>
-                String(file.category || "").trim().toLowerCase()
-              )
-            ).size}
+            {
+              new Set(
+                files.map((file) =>
+                  String(file.category || "")
+                    .trim()
+                    .toLowerCase()
+                )
+              ).size
+            }
           </strong>
         </div>
 

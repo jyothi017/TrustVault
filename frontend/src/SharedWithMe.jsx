@@ -1,52 +1,93 @@
 
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
 
-const sharedDocuments = [
-  {
-    id: 1,
-    name: "Project Requirements.pdf",
-    owner: "Priya Sharma",
-    email: "priya@example.com",
-    permission: "View",
-    date: "18 Oct 2026",
-    status: "Active",
-  },
-  {
-    id: 2,
-    name: "Team Report.docx",
-    owner: "Rahul Verma",
-    email: "rahul@example.com",
-    permission: "Edit",
-    date: "17 Oct 2026",
-    status: "Active",
-  },
-  {
-    id: 3,
-    name: "Security Guidelines.pdf",
-    owner: "Ananya Rao",
-    email: "ananya@example.com",
-    permission: "View",
-    date: "15 Oct 2026",
-    status: "Expired",
-  },
-];
+const API_URL = "http://localhost:5000/api/shared-with-me";
+
+function getAuthHeaders() {
+  const savedSession = localStorage.getItem("trustvault_session");
+  const session = savedSession ? JSON.parse(savedSession) : null;
+
+  if (!session?.token) {
+    throw new Error("Please log in again to view shared documents.");
+  }
+
+  return {
+    Authorization: `Bearer ${session.token}`,
+  };
+}
 
 export default function SharedWithMe() {
+  const [sharedDocuments, setSharedDocuments] = useState([]);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("All");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  const documents = sharedDocuments.filter((doc) => {
-    const matchesSearch =
-      doc.name.toLowerCase().includes(search.toLowerCase()) ||
-      doc.owner.toLowerCase().includes(search.toLowerCase());
+  const loadDocuments = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    setMessage("");
 
-    const matchesFilter =
-      filter === "All" || doc.status === filter;
+    try {
+      const response = await fetch(API_URL, {
+        method: "GET",
+        headers: {
+          ...getAuthHeaders(),
+          "Cache-Control": "no-cache",
+        },
+        cache: "no-store",
+      });
 
-    return matchesSearch && matchesFilter;
-  });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          data.error || `Could not load shared documents (${response.status}).`
+        );
+      }
+
+      if (!Array.isArray(data)) {
+        throw new Error("Invalid response received from the server.");
+      }
+
+      setSharedDocuments(data);
+    } catch (err) {
+      setError(err.message || "Could not connect to the backend.");
+      console.error("Shared documents error:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDocuments();
+  }, [loadDocuments]);
+
+  const documents = useMemo(() => {
+    return sharedDocuments.filter((doc) => {
+      const name = String(doc.name || "");
+      const owner = String(doc.shared_with_name || "");
+      const email = String(doc.shared_with_email || "");
+
+      const matchesSearch = `${name} ${owner} ${email}`
+        .toLowerCase()
+        .includes(search.toLowerCase());
+
+      const matchesFilter = filter === "All" || doc.status === filter;
+
+      return matchesSearch && matchesFilter;
+    });
+  }, [sharedDocuments, search, filter]);
+
+  const activeCount = sharedDocuments.filter(
+    (doc) => doc.status === "Active"
+  ).length;
+
+  const viewCount = sharedDocuments.filter(
+    (doc) => doc.permission === "Read" || doc.permission === "View"
+  ).length;
 
   return (
     <div className="vault-page">
@@ -56,26 +97,33 @@ export default function SharedWithMe() {
             DOCUMENT ACCESS / COLLABORATION
           </span>
           <h1>Shared with me</h1>
-          <p>Documents that other people have shared with you.</p>
+          <p>Documents shared with your account.</p>
         </div>
+
+        <button
+          className="text-button"
+          type="button"
+          onClick={loadDocuments}
+          disabled={loading}
+        >
+          {loading ? "Refreshing..." : "↻ Refresh"}
+        </button>
       </div>
 
       <div className="vault-stats">
         <div>
           <span>Total shared documents</span>
-          <strong>{sharedDocuments.length}</strong>
+          <strong>{loading ? "…" : sharedDocuments.length}</strong>
         </div>
+
         <div>
           <span>Active access</span>
-          <strong>
-            {sharedDocuments.filter((doc) => doc.status === "Active").length}
-          </strong>
+          <strong>{loading ? "…" : activeCount}</strong>
         </div>
+
         <div>
           <span>View access</span>
-          <strong>
-            {sharedDocuments.filter((doc) => doc.permission === "View").length}
-          </strong>
+          <strong>{loading ? "…" : viewCount}</strong>
         </div>
       </div>
 
@@ -83,8 +131,9 @@ export default function SharedWithMe() {
         <div className="vault-panel-heading">
           <div>
             <h2>Shared documents</h2>
-            <p>Review the documents and permissions assigned to you.</p>
+            <p>Documents assigned to your account through permissions.</p>
           </div>
+
           <span className="vault-count">{documents.length} files</span>
         </div>
 
@@ -94,7 +143,7 @@ export default function SharedWithMe() {
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search document or owner..."
+              placeholder="Search document or sharer..."
             />
           </label>
 
@@ -105,12 +154,23 @@ export default function SharedWithMe() {
           >
             <option value="All">All statuses</option>
             <option value="Active">Active</option>
-            <option value="Expired">Expired</option>
+            <option value="Revoked">Revoked</option>
           </select>
         </div>
 
+        {error && (
+          <div className="vault-empty" role="alert">
+            {error}
+            <button type="button" onClick={loadDocuments}>
+              Try again
+            </button>
+          </div>
+        )}
+
         {message && (
-          <p className="vault-message" role="status">{message}</p>
+          <p className="vault-message" role="status">
+            {message}
+          </p>
         )}
 
         <div className="vault-table-wrap">
@@ -122,59 +182,63 @@ export default function SharedWithMe() {
                 <th>PERMISSION</th>
                 <th>SHARED DATE</th>
                 <th>STATUS</th>
-                <th>ACTION</th>
               </tr>
             </thead>
+
             <tbody>
-              {documents.map((doc) => (
+              {!loading && !error && documents.map((doc) => (
                 <tr key={doc.id}>
                   <td>
                     <div className="vault-file">
                       <span className="vault-file-icon pdf">
-                        {doc.name.split(".").pop().toUpperCase()}
+                        {String(doc.name || "FILE").split(".").pop().toUpperCase()}
                       </span>
-                      <strong>{doc.name}</strong>
+                      <strong>{doc.name || "Unnamed document"}</strong>
                     </div>
                   </td>
+
                   <td>
-                    <strong>{doc.owner}</strong>
+                    <strong>{doc.shared_with_name || "Shared user"}</strong>
                     <br />
-                    <span>{doc.email}</span>
+                    <span>{doc.shared_with_email || "—"}</span>
                   </td>
+
                   <td>
-                    <span className="vault-category">{doc.permission}</span>
+                    <span className="vault-category">
+                      {doc.permission || "Read"}
+                    </span>
                   </td>
-                  <td>{doc.date}</td>
+
                   <td>
-                    <span className="vault-category">{doc.status}</span>
+                    {doc.shared_at
+                      ? new Date(doc.shared_at).toLocaleDateString("en-IN")
+                      : "—"}
                   </td>
+
                   <td>
-                    <button
-                      className="vault-delete"
-                      type="button"
-                      disabled={doc.status !== "Active"}
-                      onClick={() =>
-                        setMessage(
-                          `${doc.name}: preview only. Secure document access is not connected yet.`
-                        )
-                      }
-                    >
-                      Open
-                    </button>
+                    <span className="vault-category">
+                      {doc.status || "Active"}
+                    </span>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
 
-          {documents.length === 0 && (
-            <div className="vault-empty">No shared documents found.</div>
+          {loading && (
+            <div className="vault-empty">Loading shared documents...</div>
+          )}
+
+          {!loading && !error && documents.length === 0 && (
+            <div className="vault-empty">
+              No shared documents found for your account.
+            </div>
           )}
         </div>
 
         <div className="vault-footer">
-          <span>Shared documents preview</span>
-          <span>Server permissions not connected</span>
+          <span>Source: TrustVault database permissions</span>
+          <span>{loading ? "Loading..." : `${sharedDocuments.length} records`}</span>
         </div>
       </section>
     </div>

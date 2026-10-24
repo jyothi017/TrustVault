@@ -1,50 +1,16 @@
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import AccessControl from "./AccessControl";
 import MyVault from "./MyVault";
 import SharedWithMe from "./SharedWithMe";
 import AuditTrail from "./AuditTrail";
 import ThreatCenter from "./ThreatCenter";
+import Login from "./Login";
 
-const documents = [
-  {
-    name: "Project Proposal.pdf",
-    category: "Business",
-    owner: "Jyothi",
-    date: "18 Oct 2026",
-    access: "Owner",
-    type: "PDF",
-    color: "purple",
-  },
-  {
-    name: "Employee Records.xlsx",
-    category: "HR",
-    owner: "Admin",
-    date: "17 Oct 2026",
-    access: "Read only",
-    type: "XLS",
-    color: "green",
-  },
-  {
-    name: "Security Policy.docx",
-    category: "Security",
-    owner: "Jyothi",
-    date: "16 Oct 2026",
-    access: "Edit access",
-    type: "DOC",
-    color: "blue",
-  },
-  {
-    name: "Financial Report.pdf",
-    category: "Finance",
-    owner: "Admin",
-    date: "15 Oct 2026",
-    access: "Read only",
-    type: "PDF",
-    color: "pink",
-  },
-];
+
+const API_BASE = "http://localhost:5000/api";
+
 
 const navItems = [
   { icon: "◈", label: "Overview" },
@@ -55,21 +21,330 @@ const navItems = [
   { icon: "⛨", label: "Threat Center" },
 ];
 
+function formatDate(value) {
+  if (!value) return "—";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "—";
+
+  return date.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function formatDateTime(value) {
+  if (!value) return "Date unavailable";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "Date unavailable";
+
+  return date.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getFileType(doc) {
+  const type = String(doc.file_type || "").trim();
+
+  if (type) {
+    const normalized = type.replace(/^\./, "").toUpperCase();
+    if (normalized === "APPLICATION/PDF") return "PDF";
+    return normalized;
+  }
+
+  const name = String(doc.name || "");
+  const extension = name.includes(".") ? name.split(".").pop() : "";
+
+  return extension ? extension.toUpperCase() : "FILE";
+}
+
+function getFileColor(type) {
+  const value = String(type).toLowerCase();
+
+  if (value.includes("pdf")) return "purple";
+  if (value.includes("xls") || value.includes("csv")) return "green";
+  if (value.includes("doc") || value.includes("txt")) return "blue";
+
+  return "pink";
+}
+
+function getActionLabel(action) {
+  const labels = {
+    REGISTER: "Account registered",
+    LOGIN: "User logged in",
+    UPLOAD: "Document uploaded",
+    CREATE_METADATA: "Document record created",
+    DOWNLOAD: "Document downloaded",
+    DELETE: "Document deleted",
+    GRANT_ACCESS: "Document access granted",
+    GRANT_READ: "Read permission granted",
+    GRANT_EDIT: "Edit permission granted",
+    REVOKE_ACCESS: "Document access revoked",
+    REVOKE_PERMISSION: "Document permission revoked",
+    REVIEW_STATUS_UPDATED: "Review status updated",
+    REVIEW_PENDING: "Review marked pending",
+    REVIEW_APPROVED: "Document approved",
+    REVIEW_REJECTED: "Document rejected",
+  };
+
+  const key = String(action || "").toUpperCase();
+
+  return (
+    labels[key] ||
+    String(action || "Activity recorded").replaceAll("_", " ")
+  );
+}
+
+function getActivityStyle(action) {
+  const value = String(action || "").toUpperCase();
+
+  if (
+    value.includes("UPLOAD") ||
+    value.includes("REGISTER") ||
+    value.includes("GRANT")
+  ) {
+    return "uploaded";
+  }
+
+  if (value.includes("DOWNLOAD") || value.includes("LOGIN")) {
+    return "success";
+  }
+
+  if (value.includes("DELETE") || value.includes("REVOKE")) {
+    return "denied";
+  }
+
+  return "changed";
+}
+
+function getDocumentOwner(doc) {
+  return (
+    doc.owner_name ||
+    doc.owner ||
+    doc.uploaded_by ||
+    ""
+  );
+}
+
+function getDocumentAccess(doc) {
+  return (
+    doc.access_level ||
+    doc.access ||
+    (doc.owner_user_id || doc.owner_id ? "" : "")
+  );
+}
+
 function App() {
+  const [session, setSession] = useState(() => {
+    try {
+      const savedSession = localStorage.getItem("trustvault_session");
+      return savedSession ? JSON.parse(savedSession) : null;
+    } catch {
+      return null;
+    }
+  });
+
   const [active, setActive] = useState("Overview");
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All files");
 
-  const visibleDocuments = documents.filter((doc) => {
-    const matchesSearch = `${doc.name} ${doc.owner} ${doc.category}`
-      .toLowerCase()
-      .includes(search.toLowerCase());
+  const [documents, setDocuments] = useState([]);
+  const [auditLogs, setAuditLogs] = useState([]);
 
-    const matchesCategory =
-      category === "All files" || doc.category === category;
-
-    return matchesSearch && matchesCategory;
+  const [dashboardStats, setDashboardStats] = useState({
+    totalDocuments: 0,
+    sharedWithOthers: 0,
+    pendingReviews: 0,
+    completedReviews: 0,
+    securityEvents: 0,
   });
+
+  const [dashboardLoading, setDashboardLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadDashboard() {
+      if (!session?.token) {
+        setDocuments([]);
+        setAuditLogs([]);
+        setDashboardLoading(false);
+        setDashboardError("");
+        return;
+      }
+
+      try {
+        setDashboardLoading(true);
+        setDashboardError("");
+
+        const headers = {
+          Authorization: `Bearer ${session.token}`,
+        };
+
+        const [docsResponse, logsResponse, statsResponse] =
+          await Promise.all([
+            fetch(`${API_BASE}/documents`, { headers }),
+            fetch(`${API_BASE}/audit-logs`, { headers }),
+            fetch(`${API_BASE}/dashboard-stats`, { headers }),
+          ]);
+
+        if (
+          docsResponse.status === 401 ||
+          logsResponse.status === 401 ||
+          statsResponse.status === 401
+        ) {
+          throw new Error("Your session has expired. Please log in again.");
+        }
+
+        if (!docsResponse.ok) {
+          throw new Error("Could not load documents.");
+        }
+
+        if (!logsResponse.ok) {
+          throw new Error("Could not load audit activity.");
+        }
+
+        if (!statsResponse.ok) {
+          throw new Error("Could not load dashboard statistics.");
+        }
+
+        const [docsData, logsData, statsData] = await Promise.all([
+          docsResponse.json(),
+          logsResponse.json(),
+          statsResponse.json(),
+        ]);
+
+        // APIs may return either an array or an object containing an array.
+        const documentList = Array.isArray(docsData)
+          ? docsData
+          : docsData?.documents;
+
+        const activityList = Array.isArray(logsData)
+          ? logsData
+          : logsData?.logs;
+
+        // The tested dashboard-stats endpoint returns its statistics directly.
+        if (
+          !Array.isArray(documentList) ||
+          !Array.isArray(activityList) ||
+          !statsData ||
+          typeof statsData !== "object"
+        ) {
+          throw new Error("The backend returned an unexpected data format.");
+        }
+
+        if (!cancelled) {
+          setDocuments(documentList);
+          setAuditLogs(activityList);
+
+          setDashboardStats({
+            totalDocuments: Number(statsData.totalDocuments) || 0,
+            sharedWithOthers: Number(statsData.sharedWithOthers) || 0,
+            pendingReviews: Number(statsData.pendingReviews) || 0,
+            completedReviews: Number(statsData.completedReviews) || 0,
+            securityEvents: Number(statsData.securityEvents) || 0,
+          });
+        }
+      } catch (error) {
+        console.error("Dashboard loading error:", error);
+
+        if (!cancelled) {
+          setDashboardError(
+            error.message || "Could not connect to the backend."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setDashboardLoading(false);
+        }
+      }
+    }
+
+    loadDashboard();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.token]);
+
+  const visibleDocuments = useMemo(() => {
+    const searchText = search.trim().toLowerCase();
+
+    return documents.filter((doc) => {
+      const name = doc.name || "Untitled document";
+      const owner = getDocumentOwner(doc);
+      const docCategory = doc.category || "Other";
+
+      const matchesSearch = `${name} ${owner} ${docCategory}`
+        .toLowerCase()
+        .includes(searchText);
+
+      const matchesCategory =
+        category === "All files" || docCategory === category;
+
+      return matchesSearch && matchesCategory;
+    });
+  }, [documents, search, category]);
+
+  const recentDocuments = useMemo(() => {
+    return [...visibleDocuments]
+      .sort(
+        (a, b) =>
+          new Date(b.created_at || 0) - new Date(a.created_at || 0)
+      )
+      .slice(0, 6);
+  }, [visibleDocuments]);
+
+  const recentActivity = useMemo(
+    () => [...auditLogs].slice(0, 5),
+    [auditLogs]
+  );
+
+const categoryOptions = useMemo(() => {
+  const defaultCategories = [
+    "Business",
+    "HR",
+    "Security",
+    "Finance",
+    "Other",
+  ];
+
+  const documentCategories = documents.map(
+    (doc) => doc.category || "Other"
+  );
+
+  return [
+    ...new Set([...defaultCategories, ...documentCategories]),
+  ].sort((a, b) => a.localeCompare(b));
+}, [documents]);
+
+  function handleLogout() {
+    localStorage.removeItem("trustvault_session");
+    setSession(null);
+    setActive("Overview");
+    setDocuments([]);
+    setAuditLogs([]);
+    setDashboardError("");
+  }
+
+  if (!session?.token) {
+    return (
+      <Login
+        onLogin={(data) => {
+          localStorage.setItem("trustvault_session", JSON.stringify(data));
+          setSession(data);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -106,11 +381,16 @@ function App() {
           <div className="security-mini">
             <div className="security-mini-icon">✳</div>
             <strong>Your vault is protected</strong>
-            <p>Access policies are enforced by the server.</p>
+            <p>Manage document permissions in Access Control.</p>
             <span>
               <i /> SECURITY FIRST
             </span>
           </div>
+
+          <button className="nav-item logout-button" onClick={handleLogout}>
+            <span className="nav-icon">↪</span>
+            <span>Log out</span>
+          </button>
         </div>
       </aside>
 
@@ -124,45 +404,78 @@ function App() {
             <div className="system-status">
               <i /> SYSTEM STATUS
             </div>
-            <div className="top-avatar">JJ</div>
+            <div className="top-avatar">
+              {String(session.user?.name || "JJ")
+                .split(" ")
+                .map((part) => part[0])
+                .join("")
+                .slice(0, 2)
+                .toUpperCase()}
+            </div>
           </div>
         </header>
 
-<section className="page-content">
-  {active === "Access Control" ? (
-    <AccessControl />
-  ) : active === "My Vault" ? (
-    <MyVault />
-  ) : active === "Shared with me" ? (
-    <SharedWithMe />
-  ) : active === "Audit Trail" ? (
-    <AuditTrail />
-  ) : active === "Threat Center" ? (
-    <ThreatCenter />
-  ) : (
-    <>
-
+        <section className="page-content">
+          {active === "Access Control" ? (
+            <AccessControl />
+          ) : active === "My Vault" ? (
+            <MyVault />
+          ) : active === "Shared with me" ? (
+            <SharedWithMe />
+          ) : active === "Audit Trail" ? (
+            <AuditTrail />
+          ) : active === "Threat Center" ? (
+            <ThreatCenter />
+          ) : (
+            <>
               <div className="section-heading">
                 <div>
-                  <h2>
-                    {active === "Overview"
-                      ? "Your vault at a glance"
-                      : active}
-                  </h2>
-                  <p>
-                    {active === "Overview"
-                      ? "A quick snapshot of your workspace."
-                      : "Explore your secure document workspace."}
-                  </p>
+                  <h2>Your vault at a glance</h2>
+                  <p>A live snapshot of your document workspace.</p>
                 </div>
 
-                <button
-                  className="text-button"
-                  onClick={() => setActive("Audit Trail")}
-                >
-                  View activity <span>↗</span>
-                </button>
+          <div className="heading-actions">
+  <select
+    className="heading-category"
+    value={category}
+    onChange={(event) => setCategory(event.target.value)}
+    aria-label="Filter documents by category"
+  >
+    <option value="All files">All Categories</option>
+    {categoryOptions.map((option) => (
+      <option key={option} value={option}>
+        {option}
+      </option>
+    ))}
+  </select>
+
+  <button
+    className="upload-btn"
+    onClick={() => setActive("My Vault")}
+  >
+    + Upload Document
+  </button>
+
+  <button
+    className="text-button"
+    onClick={() => setActive("Audit Trail")}
+  >
+    View activity <span>↗</span>
+  </button>
+</div>
               </div>
+
+              {dashboardError && (
+                <div className="empty-state" role="alert">
+                  {dashboardError}
+                  <button
+                    className="text-button"
+                    onClick={() => window.location.reload()}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
 
               <div className="stats-grid">
                 <div className="stat-card">
@@ -170,12 +483,15 @@ function App() {
                     <span>Total documents</span>
                     <div className="stat-icon violet">▤</div>
                   </div>
+
                   <div className="stat-value">
-                    24 <span className="stat-caption">files</span>
+                    {dashboardLoading ? "…" : dashboardStats.totalDocuments}
+                    <span className="stat-caption"> files</span>
                   </div>
+
                   <div className="stat-foot">
                     <span className="stat-neutral">◈</span>
-                    Across your workspace
+                    Documents you can access
                   </div>
                 </div>
 
@@ -184,12 +500,14 @@ function App() {
                     <span>Shared with others</span>
                     <div className="stat-icon cyan">⇄</div>
                   </div>
+
                   <div className="stat-value">
-                    08 <span className="stat-caption">documents</span>
+                    {dashboardLoading ? "…" : dashboardStats.sharedWithOthers}
+                    <span className="stat-caption"> active shares</span>
                   </div>
+
                   <div className="stat-foot">
-                    <span className="stat-neutral">◉</span>
-                    Review access regularly
+                    Active document permission entries
                   </div>
                 </div>
 
@@ -198,12 +516,14 @@ function App() {
                     <span>Pending reviews</span>
                     <div className="stat-icon amber">◷</div>
                   </div>
+
                   <div className="stat-value">
-                    03 <span className="stat-caption">items</span>
+                    {dashboardLoading ? "…" : dashboardStats.pendingReviews}
+                    <span className="stat-caption"> pending</span>
                   </div>
+
                   <div className="stat-foot">
-                    <span className="stat-neutral">↗</span>
-                    Check document access
+                    Documents awaiting review
                   </div>
                 </div>
 
@@ -212,12 +532,14 @@ function App() {
                     <span>Security events</span>
                     <div className="stat-icon green">⛨</div>
                   </div>
+
                   <div className="stat-value">
-                    12 <span className="stat-caption">recent</span>
+                    {dashboardLoading ? "…" : dashboardStats.securityEvents}
+                    <span className="stat-caption"> logged events</span>
                   </div>
+
                   <div className="stat-foot">
-                    <span className="event-indicator" />
-                    Audit activity preview
+                    Total recorded audit events
                   </div>
                 </div>
               </div>
@@ -227,7 +549,7 @@ function App() {
                   <div className="panel-heading">
                     <div>
                       <h2>Recent documents</h2>
-                      <p>Manage your files and their access.</p>
+                      <p>Latest documents stored in your vault.</p>
                     </div>
 
                     <button
@@ -243,26 +565,12 @@ function App() {
                       <span>⌕</span>
                       <input
                         value={search}
-                        onChange={(event) =>
-                          setSearch(event.target.value)
-                        }
+                        onChange={(event) => setSearch(event.target.value)}
                         placeholder="Search documents..."
                       />
                     </label>
 
-                    <select
-                      value={category}
-                      onChange={(event) =>
-                        setCategory(event.target.value)
-                      }
-                      aria-label="Filter category"
-                    >
-                      <option>All files</option>
-                      <option>Business</option>
-                      <option>HR</option>
-                      <option>Security</option>
-                      <option>Finance</option>
-                    </select>
+                   
                   </div>
 
                   <div className="document-list">
@@ -273,58 +581,79 @@ function App() {
                       <span>UPDATED</span>
                     </div>
 
-                    {visibleDocuments.map((doc) => (
-                      <div className="document-row" key={doc.name}>
-                        <div className="document-name">
-                          <div className={`file-icon ${doc.color}`}>
-                            {doc.type}
-                          </div>
-
-                          <div>
-                            <strong>{doc.name}</strong>
-                            <span>{doc.category}</span>
-                          </div>
-                        </div>
-
-                        <div className="owner-cell">
-                          <div className="small-avatar">
-                            {doc.owner[0]}
-                          </div>
-                          {doc.owner}
-                        </div>
-
-                        <div>
-                          <span
-                            className={`access-pill ${
-                              doc.access === "Owner"
-                                ? "owner"
-                                : doc.access === "Edit access"
-                                  ? "edit"
-                                  : "read"
-                            }`}
-                          >
-                            {doc.access}
-                          </span>
-                        </div>
-
-                        <div className="date-cell">{doc.date}</div>
-                      </div>
-                    ))}
-
-                    {visibleDocuments.length === 0 && (
+                    {dashboardLoading ? (
                       <div className="empty-state">
-                        No matching documents found. Try another search.
+                        Loading documents…
+                      </div>
+                    ) : recentDocuments.length > 0 ? (
+                      recentDocuments.map((doc) => {
+                        const type = getFileType(doc);
+                        const name = doc.name || "Untitled document";
+                        const owner = getDocumentOwner(doc);
+                        const access = getDocumentAccess(doc);
+
+                        return (
+                          <div
+                            className="document-row"
+                            key={doc.id ?? name}
+                          >
+                            <div className="document-name">
+                              <div
+                                className={`file-icon ${getFileColor(type)}`}
+                              >
+                                {type}
+                              </div>
+
+                              <div>
+                                <strong>{name}</strong>
+                                <span>{doc.category || "Other"}</span>
+                              </div>
+                            </div>
+
+                            <div className="owner-cell">
+                              <div className="small-avatar">
+                                {String(owner || "?").charAt(0).toUpperCase()}
+                              </div>
+                              {owner || "Unknown"}
+                            </div>
+
+                            <div>
+                              <span
+                                className={`access-pill ${
+                                  access.toLowerCase().includes("owner")
+                                    ? "owner"
+                                    : access.toLowerCase().includes("edit")
+                                      ? "edit"
+                                      : "read"
+                                }`}
+                              >
+                                {access || "Read"}
+                              </span>
+                            </div>
+
+                            <div className="date-cell">
+                              {formatDate(doc.created_at)}
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="empty-state">
+                        {dashboardError
+                          ? "Documents could not be loaded."
+                          : "No matching documents found."}
                       </div>
                     )}
                   </div>
 
                   <div className="panel-footer">
                     <span>
-                      Showing {visibleDocuments.length} preview documents
+                      Showing{" "}
+                      {dashboardLoading ? "…" : recentDocuments.length} of{" "}
+                      {dashboardLoading ? "…" : dashboardStats.totalDocuments}{" "}
+                      documents
                     </span>
-                    <span>
-                      Design preview · Not connected to storage
-                    </span>
+                    <span>Connected to document API</span>
                   </div>
                 </section>
 
@@ -332,50 +661,55 @@ function App() {
                   <div className="panel-heading">
                     <div>
                       <h2>Trust activity</h2>
-                      <p>Illustrative security timeline.</p>
+                      <p>Latest recorded audit events.</p>
                     </div>
 
                     <span className="live-label">
-                      <i /> DEMO
+                      <i /> AUDIT
                     </span>
                   </div>
 
                   <div className="activity-list">
-                    <div className="activity-item">
-                      <div className="activity-icon success">✓</div>
-                      <div>
-                        <strong>Document access granted</strong>
-                        <p>Project Proposal.pdf</p>
-                        <span>Today · 10:42 AM</span>
+                    {dashboardLoading ? (
+                      <div className="empty-state">
+                        Loading activity…
                       </div>
-                    </div>
+                    ) : recentActivity.length > 0 ? (
+                      recentActivity.map((log, index) => (
+                        <div
+                          className="activity-item"
+                          key={log.id ?? `${log.action}-${index}`}
+                        >
+                          <div
+                            className={`activity-icon ${getActivityStyle(
+                              log.action
+                            )}`}
+                          >
+                            {String(log.action || "").toUpperCase().includes("DELETE")
+                              ? "!"
+                              : String(log.action || "").toUpperCase().includes("DOWNLOAD")
+                                ? "↓"
+                                : String(log.action || "").toUpperCase().includes("UPLOAD")
+                                  ? "↑"
+                                  : "↻"}
+                          </div>
 
-                    <div className="activity-item">
-                      <div className="activity-icon denied">!</div>
-                      <div>
-                        <strong>Access denied</strong>
-                        <p>Unauthorized download blocked</p>
-                        <span>Today · 10:18 AM</span>
+                          <div>
+                            <strong>{getActionLabel(log.action)}</strong>
+                            <p>
+                              {log.document_name ||
+                                log.details?.message ||
+                                "Document activity"}
+                            </p>
+                            <span>{formatDateTime(log.created_at)}</span>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="empty-state">
+                        No audit events recorded yet.
                       </div>
-                    </div>
-
-                    <div className="activity-item">
-                      <div className="activity-icon changed">↻</div>
-                      <div>
-                        <strong>Permission updated</strong>
-                        <p>Employee Records.xlsx</p>
-                        <span>Today · 09:54 AM</span>
-                      </div>
-                    </div>
-
-                    <div className="activity-item">
-                      <div className="activity-icon uploaded">↑</div>
-                      <div>
-                        <strong>New document uploaded</strong>
-                        <p>Security Policy.docx</p>
-                        <span>Yesterday · 04:21 PM</span>
-                      </div>
-                    </div>
+                    )}
                   </div>
 
                   <button
@@ -394,7 +728,7 @@ function App() {
                     / SECURE BY DESIGN
                   </span>
                 </span>
-                <span>UI prototype · Demo data only</span>
+                <span>Live document and audit data</span>
               </footer>
             </>
           )}
