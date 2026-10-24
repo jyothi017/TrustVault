@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
 
-const API_URL = "http://localhost:5000/api/audit-logs";
+const API_URL = "https://trustvault-backend-z1yy.onrender.com/api/audit-logs";
 
 function formatDate(value) {
   if (!value) return "—";

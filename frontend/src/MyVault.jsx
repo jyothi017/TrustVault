@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
-const API_URL = "http://localhost:5000/api/documents";
+const API_URL = "https://trustvault-backend-z1yy.onrender.com/api/documents";
 
 function getAuthHeaders() {
   const savedSession = localStorage.getItem("trustvault_session");
